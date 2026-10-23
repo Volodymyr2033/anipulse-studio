@@ -23,7 +23,7 @@ const PRIMARY = 'bg-fuchsia-500 hover:bg-fuchsia-400 text-white';
 function Kino({ a }: { a: Anime }) {
   useEffect(() => {
     const w = window as any;
-    const init = () => new w.Kinobox('.kinobox_player', { search: { shikimori: String(a.id), title: a.title } }).init();
+    const init = () => new w.Kinobox('.kinobox_player', { search: { title: a.title } }).init();
     if (w.Kinobox) init(); else { const s = document.createElement('script'); s.src = 'https://kinobox.tv/kinobox.min.js'; s.onload = init; document.body.appendChild(s); }
     return () => { const el = document.querySelector('.kinobox_player'); if (el) el.innerHTML = ''; };
   }, [a.id, a.title]);
@@ -55,8 +55,10 @@ export default function App() {
 
   const open = async (p: Promise<Anime>) => {
     setBusy(true); setErr('');
-    try { const a = await p; setAnime(a); setRes(null); setEpN(1); setRes(await resolve(a)); } catch { setErr('Ничего не найдено. Проверьте название или ссылку.'); }
-    setBusy(false);
+    let a: Anime;
+    try { a = await p; } catch (e) { setErr(e instanceof Error ? e.message : 'Не удалось загрузить данные.'); setBusy(false); return; }
+    setAnime(a); setRes(null); setEpN(1); setBusy(false); // карточка показывается сразу, поток подбирается в фоне
+    setRes(await resolve(a));
   };
   const go = (a: Anime, eps: Ep[] | null, n: number, start = 0) => { setPlay({ a, eps, n, start }); setTab(1); };
   const enqueue = (a: Anime, eps: Ep[]) => setDb((d) => { const queue = [...d.queue];
@@ -103,7 +105,7 @@ export default function App() {
             <section className="grid md:grid-cols-[220px_1fr] gap-6 bg-white/5 border border-white/10 rounded-2xl p-5">
               <Img src={anime.poster} c="w-full rounded-xl aspect-[2/3] object-cover bg-black/40" />
               <div className="space-y-4">
-                <div><h2 className="text-2xl font-bold">{anime.title}</h2><p className="text-slate-400">{anime.titleEn} · {anime.episodes || '?'} эп. · ★ {anime.score}</p></div>
+                <div><h2 className="text-2xl font-bold">{anime.title}</h2><p className="text-slate-400">{anime.titleEn} · {anime.episodes || '?'} эп.{anime.score && ` · ★ ${anime.score}`}</p></div>
                 <p className="text-slate-300 text-sm max-h-32 overflow-y-auto">{anime.desc}</p>
                 {!res && <p className="text-cyan2 text-sm">Подбираю поток…</p>}
                 {res?.mode === 'hls' && <>
