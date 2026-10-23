@@ -17,7 +17,8 @@ export default function Player({ ep, start, onTime, onNav, onDl }: P) {
   useEffect(() => {
     const el = v.current!; let h: Hls | undefined;
     const go = () => { if (resume.current > 1) el.currentTime = resume.current; resume.current = 0; el.play().catch(() => {}); };
-    if (Hls.isSupported()) { h = new Hls(); h.loadSource(src); h.attachMedia(el); h.on(Hls.Events.MANIFEST_PARSED, go); }
+    // HLS через hls.js; прямой mp4 (AnimeVost) и нативный HLS (iOS) — через src
+    if (/\.m3u8/i.test(src) && Hls.isSupported()) { h = new Hls(); h.loadSource(src); h.attachMedia(el); h.on(Hls.Events.MANIFEST_PARSED, go); }
     else { el.src = src; el.onloadedmetadata = go; }
     return () => h?.destroy();
   }, [src]);

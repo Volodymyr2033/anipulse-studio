@@ -8,7 +8,7 @@ const CHIPS: [string, number][] = [['Человек-бензопила', 44511],
   ['Атака титанов', 16498], ['Хвост Феи', 6702], ['Ван-Пис', 21]];
 const TABS = ['Поиск и Главная', 'Плеер', 'Избранное', 'Очередь загрузок', 'Сохраненное', 'История'];
 const STAT: Record<Status, string> = { watching: 'Смотрю', planned: 'В планах', done: 'Просмотрено', loved: 'Любимое' };
-type Ctx = { a: Anime; eps: Ep[] | null; n: number; start: number };
+type Ctx = { a: Anime; eps: Ep[] | null; n: number; start: number; voice: string };
 
 const empty = (): DB => ({ fav: [], queue: [], saved: [], hist: [] });
 const load = (): DB => { try { const d = { ...empty(), ...JSON.parse(localStorage.getItem('ap_db') || '{}') } as DB;
@@ -33,7 +33,7 @@ function Kino({ a }: { a: Anime }) {
 export default function App() {
   const [tab, setTab] = useState(0), [db, setDb] = useState<DB>(load), [anime, setAnime] = useState<Anime | null>(null), [res, setRes] = useState<Resolved | null>(null);
   const [q, setQ] = useState(''), [busy, setBusy] = useState(false), [err, setErr] = useState(''), [play, setPlay] = useState<Ctx | null>(null);
-  const [folder, setFolder] = useState<number | null>(null), [quality, setQuality] = useState('1080'), [epN, setEpN] = useState(1);
+  const [voiceId, setVoiceId] = useState(''), [folder, setFolder] = useState<number | null>(null), [quality, setQuality] = useState('1080'), [epN, setEpN] = useState(1);
   const [favSt, setFavSt] = useState<Status>('planned'), [filt, setFilt] = useState<Status | 'all'>('all');
   const running = useRef<string | null>(null), ctrls = useRef(new Map<string, AbortController>());
 
@@ -48,7 +48,7 @@ export default function App() {
     const url = t.ep.q[t.quality] || t.ep.q['720'] || t.ep.q['480'];
     dl(url, (p) => upd(t.key, { progress: p }), ac.signal)
       .then(async (b) => { await putBlob(t.key, b); setDb((d) => ({ ...d, queue: d.queue.filter((x) => x.key !== t.key),
-        saved: [...d.saved, { key: t.key, anime: t.anime, ep: t.ep, quality: t.quality, size: b.size }] })); })
+        saved: [...d.saved, { key: t.key, anime: t.anime, ep: t.ep, voice: t.voice, quality: t.quality, size: b.size }] })); })
       .catch(() => { if (!ac.signal.aborted) upd(t.key, { status: 'error' }); })
       .finally(() => { if (running.current === t.key) running.current = null; ctrls.current.delete(t.key); });
   }, [db.queue]);
@@ -58,26 +58,27 @@ export default function App() {
     let a: Anime;
     try { a = await p; } catch (e) { setErr(e instanceof Error ? e.message : 'Не удалось загрузить данные.'); setBusy(false); return; }
     setAnime(a); setRes(null); setEpN(1); setBusy(false); // карточка показывается сразу, поток подбирается в фоне
-    setRes(await resolve(a));
+    const r = await resolve(a);
+    setVoiceId(r.mode === 'hls' ? r.voices[0].id : ''); setRes(r);
   };
-  const go = (a: Anime, eps: Ep[] | null, n: number, start = 0) => { setPlay({ a, eps, n, start }); setTab(1); };
-  const enqueue = (a: Anime, eps: Ep[]) => setDb((d) => { const queue = [...d.queue];
-    for (const ep of eps) { const key = `${a.id}:${ep.n}`; if (queue.some((x) => x.key === key) || d.saved.some((x) => x.key === key)) continue;
-      const item = { key, anime: a, ep, quality, progress: 0, status: 'queued' as const }; const i = queue.map((x) => x.anime.id).lastIndexOf(a.id);
+  const go = (a: Anime, eps: Ep[] | null, n: number, start = 0, voice = '') => { setPlay({ a, eps, n, start, voice }); setTab(1); };
+  const enqueue = (a: Anime, eps: Ep[], voice: string) => setDb((d) => { const queue = [...d.queue];
+    for (const ep of eps) { const key = `${a.id}:${voice}:${ep.n}`; if (queue.some((x) => x.key === key) || d.saved.some((x) => x.key === key)) continue;
+      const item = { key, anime: a, ep, voice, quality, progress: 0, status: 'queued' as const }; const i = queue.map((x) => x.anime.id).lastIndexOf(a.id);
       if (i < 0) queue.push(item); else queue.splice(i + 1, 0, item); }
     return { ...d, queue }; });
   const pauseQ = (k: string) => { upd(k, { status: 'paused' }); ctrls.current.get(k)?.abort(); };
   const dropQ = (k: string) => { ctrls.current.get(k)?.abort(); setDb((d) => ({ ...d, queue: d.queue.filter((x) => x.key !== k) })); };
-  const fromHist = async (h: Hist) => { const r = await resolve(h.anime); go(h.anime, r.mode === 'hls' ? r.eps : null, h.ep, h.time); };
+  const fromHist = async (h: Hist) => { const r = await resolve(h.anime); go(h.anime, r.mode === 'hls' ? r.voices[0].eps : null, h.ep, h.time, r.mode === 'hls' ? r.voices[0].name : ''); };
   const addFav = (a: Anime) => setDb((d) => ({ ...d, fav: [...d.fav.filter((f) => f.anime.id !== a.id), { anime: a, status: favSt }] }));
   const saveFile = async (s: DB['saved'][number]) => { const b = await getBlob(s.key); if (!b) return alert('Файл не найден в хранилище');
-    const u = URL.createObjectURL(b), l = document.createElement('a'); l.href = u; l.download = `${s.anime.titleEn} - ${s.ep.n}.ts`; l.click(); URL.revokeObjectURL(u); };
+    const u = URL.createObjectURL(b), l = document.createElement('a'); l.href = u; l.download = `${s.anime.titleEn} - Ep ${s.ep.n}${s.voice ? ` [${s.voice}]` : ''}.${b.type === 'video/mp4' ? 'mp4' : 'ts'}`; l.click(); URL.revokeObjectURL(u); };
   const delSaved = async (k: string) => { await delBlob(k); setDb((d) => ({ ...d, saved: d.saved.filter((x) => x.key !== k) })); };
   const backup = () => { const u = URL.createObjectURL(new Blob([JSON.stringify(db, null, 1)], { type: 'application/json' }));
     const l = document.createElement('a'); l.href = u; l.download = 'anipulse-backup.json'; l.click(); URL.revokeObjectURL(u); };
   const restore = async (f?: File) => { if (!f) return; try { setDb({ ...empty(), ...JSON.parse(await f.text()) }); } catch { alert('Некорректный файл бэкапа'); } };
 
-  const eps = res?.mode === 'hls' ? res.eps : [], cur = eps.find((e) => e.n === epN) || eps[0];
+  const voices = res?.mode === 'hls' ? res.voices : [], vo = voices.find((v) => v.id === voiceId) || voices[0], eps = vo?.eps || [], cur = eps.find((e) => e.n === epN) || eps[0];
   const counts = [null, null, db.fav.length, db.queue.length, db.saved.length, db.hist.length];
   const ep = play?.eps?.find((e) => e.n === play.n) || play?.eps?.[0];
 
@@ -111,15 +112,16 @@ export default function App() {
                 {res?.mode === 'hls' && <>
                   <div className="flex gap-2 flex-wrap">
                     <select value={cur?.n} onChange={(e) => setEpN(+e.target.value)} className="bg-ink border border-white/20 rounded-lg px-2 py-1.5 max-w-xs">{eps.map((e) => <option key={e.n} value={e.n}>{e.n}. {e.name}</option>)}</select>
+                    <select value={vo?.id} onChange={(e) => setVoiceId(e.target.value)} aria-label="Озвучка" className="bg-ink border border-white/20 rounded-lg px-2 py-1.5">{voices.map((v) => <option key={v.id} value={v.id}>Озвучка: {v.name}</option>)}</select>
                     <select value={quality} onChange={(e) => setQuality(e.target.value)} className="bg-ink border border-white/20 rounded-lg px-2 py-1.5">
                       <option value="1080">1080p Full HD</option><option value="720">720p</option><option value="480">480p</option></select></div>
                   <div className="flex flex-wrap gap-1.5">{eps.slice(0, 24).map((e) => <button key={e.n} onClick={() => setEpN(e.n)}
                     className={`w-9 h-9 rounded-lg text-sm ${cur?.n === e.n ? 'bg-fuchsia-500' : 'bg-white/10 hover:bg-white/20'}`}>{e.n}</button>)}</div></>}
                 {res?.mode === 'kinobox' && <p className="text-sm text-slate-400">Серии и озвучки (AniLibria, StudioBand, SHIZA, Дубляж) выбираются внутри плеера. Скачивание для этого тайтла недоступно.</p>}
                 <div className="flex flex-wrap gap-2 items-center">
-                  {res?.mode === 'hls' && cur && <><Btn c={PRIMARY} onClick={() => go(anime, eps, cur.n)}><Play size={16} className="inline mr-1" />Смотреть серию {cur.n}</Btn>
-                    <Btn onClick={() => enqueue(anime, [cur])}><Download size={16} className="inline mr-1" />Скачать серию {cur.n}</Btn>
-                    <Btn onClick={() => enqueue(anime, eps)}>Скачать весь сезон</Btn></>}
+                  {res?.mode === 'hls' && cur && <><Btn c={PRIMARY} onClick={() => go(anime, eps, cur.n, 0, vo.name)}><Play size={16} className="inline mr-1" />Смотреть серию {cur.n}</Btn>
+                    <Btn onClick={() => enqueue(anime, [cur], vo.name)}><Download size={16} className="inline mr-1" />Скачать серию {cur.n}</Btn>
+                    <Btn onClick={() => enqueue(anime, eps, vo.name)}>Скачать весь сезон</Btn></>}
                   {res?.mode === 'kinobox' && <Btn c={PRIMARY} onClick={() => go(anime, null, 1)}><Play size={16} className="inline mr-1" />Смотреть</Btn>}
                   <select value={favSt} onChange={(e) => setFavSt(e.target.value as Status)} className="bg-ink border border-white/20 rounded-lg px-2 py-2 text-sm">
                     {(Object.keys(STAT) as Status[]).map((s) => <option key={s} value={s}>{STAT[s]}</option>)}</select>
@@ -132,8 +134,8 @@ export default function App() {
           <h2 className="text-center font-semibold">{play.a.title}{play.eps && ` — серия ${play.n}`}</h2>
           {play.eps && ep ? <Player key={`${play.a.id}:${ep.n}`} ep={ep} start={play.start}
             onTime={(t) => setDb((d) => ({ ...d, hist: [{ key: `${play.a.id}:${ep.n}`, anime: play.a, ep: ep.n, time: t, at: Date.now() }, ...d.hist.filter((h) => h.key !== `${play.a.id}:${ep.n}`)] }))}
-            onNav={(dir) => { const l = play.eps!, n = l[l.findIndex((e) => e.n === ep.n) + dir]; if (n) go(play.a, l, n.n); }}
-            onDl={() => enqueue(play.a, [ep])} /> : <Kino a={play.a} />}</>)}
+            onNav={(dir) => { const l = play.eps!, n = l[l.findIndex((e) => e.n === ep.n) + dir]; if (n) go(play.a, l, n.n, 0, play.voice); }}
+            onDl={() => enqueue(play.a, [ep], play.voice)} /> : <Kino a={play.a} />}</>)}
 
         {tab === 2 && <>
           <div className="flex gap-2 flex-wrap">{(['all', 'watching', 'planned', 'done', 'loved'] as const).map((s) => <Btn key={s} c={filt === s ? PRIMARY : ''} onClick={() => setFilt(s)}>{s === 'all' ? 'Все' : STAT[s]}</Btn>)}</div>
@@ -149,7 +151,7 @@ export default function App() {
         {tab === 3 && (db.queue.length === 0 ? <p className="text-slate-400">Активных загрузок нет.</p> : group(db.queue).map((g) => (
           <div key={g[0].anime.id} className="bg-white/5 border border-white/10 rounded-2xl p-4 space-y-2">
             <div className="flex items-center gap-3"><Img src={g[0].anime.poster} c="w-10 h-14 object-cover rounded" /><b>{g[0].anime.title}</b></div>
-            {g.map((t) => <div key={t.key} className="flex items-center gap-3 text-sm"><span className="w-20">Серия {t.ep.n}</span>
+            {g.map((t) => <div key={t.key} className="flex items-center gap-3 text-sm"><span className="w-44 truncate">Серия {t.ep.n}{t.voice && ` [${t.voice}]`}</span>
               <div className="flex-1 h-2 bg-white/10 rounded"><div className="h-2 rounded bg-fuchsia-500" style={{ width: `${t.progress * 100}%` }} /></div>
               <span className="w-24 text-slate-400">{t.status === 'error' ? 'ошибка' : t.status === 'paused' ? 'пауза' : t.status === 'queued' ? 'в очереди' : `${Math.round(t.progress * 100)}%`}</span>
               {t.status === 'active' ? <button onClick={() => pauseQ(t.key)}><Pause size={16} /></button> : <button onClick={() => upd(t.key, { status: 'queued' })}><Play size={16} /></button>}
@@ -164,12 +166,12 @@ export default function App() {
               <button key={g[0].anime.id} onClick={() => setFolder(g[0].anime.id)} className="text-left space-y-1">
                 <Img src={g[0].anime.poster} c="w-full aspect-[2/3] object-cover rounded-xl border-2 border-fuchsia-500/40" />
                 <p className="text-sm line-clamp-2">{g[0].anime.title}</p><p className="text-xs text-slate-400">Серий сохранено: {g.length}</p></button>))}</div>)
-            : (() => { const l = db.saved.filter((s) => s.anime.id === folder).sort((a, b) => a.ep.n - b.ep.n); if (!l.length) { setFolder(null); return null; }
-              const eplist = l.map((s) => s.ep);
+            : (() => { const l = db.saved.filter((s) => s.anime.id === folder).sort((a, b) => (a.voice || '').localeCompare(b.voice || '') || a.ep.n - b.ep.n); if (!l.length) { setFolder(null); return null; }
+              const eplist = (v: string) => l.filter((s) => s.voice === v).map((s) => s.ep);
               return <div className="space-y-3"><div className="flex items-center gap-3"><Btn onClick={() => setFolder(null)}>← Папки</Btn><b>{l[0].anime.title}</b>
-                <Btn c={PRIMARY} onClick={() => go(l[0].anime, eplist, eplist[0].n)}>Смотреть плейлист подряд</Btn></div>
-                {l.map((s) => <div key={s.key} className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2 text-sm"><span className="flex-1">Серия {s.ep.n} · {s.quality}p · {(s.size / 1048576).toFixed(0)} МБ</span>
-                  <Btn onClick={() => go(s.anime, eplist, s.ep.n)}>Смотреть</Btn><Btn onClick={() => saveFile(s)}>Скачать файл на диск (.ts)</Btn>
+                <Btn c={PRIMARY} onClick={() => go(l[0].anime, eplist(l[0].voice), l[0].ep.n, 0, l[0].voice)}>Смотреть плейлист подряд</Btn></div>
+                {l.map((s) => <div key={s.key} className="flex items-center gap-3 bg-white/5 rounded-xl px-4 py-2 text-sm"><span className="flex-1">Серия {s.ep.n}{s.voice && ` [${s.voice}]`} · {s.quality}p · {(s.size / 1048576).toFixed(0)} МБ</span>
+                  <Btn onClick={() => go(s.anime, eplist(s.voice), s.ep.n, 0, s.voice)}>Смотреть</Btn><Btn onClick={() => saveFile(s)}>Скачать файл на диск (.ts)</Btn>
                   <button onClick={() => delSaved(s.key)}><Trash2 size={16} /></button></div>)}</div>; })()}</>}
 
         {tab === 5 && (db.hist.length === 0 ? <p className="text-slate-400">История просмотров пуста.</p> : db.hist.map((h) => (

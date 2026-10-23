@@ -1,27 +1,29 @@
 export type Anime = { id: number; title: string; titleEn: string; desc: string; episodes: number; score: string; poster: string };
 export type Ep = { n: number; name: string; q: Record<string, string> };
-export type Resolved = { mode: 'hls'; eps: Ep[] } | { mode: 'kinobox' };
+export type Voice = { id: string; name: string; eps: Ep[] };
+export type Resolved = { mode: 'hls'; voices: Voice[] } | { mode: 'kinobox' };
 export type Status = 'watching' | 'planned' | 'done' | 'loved';
-export type QItem = { key: string; anime: Anime; ep: Ep; quality: string; progress: number; status: 'queued' | 'active' | 'paused' | 'error' };
-export type Saved = { key: string; anime: Anime; ep: Ep; quality: string; size: number };
+export type QItem = { key: string; anime: Anime; ep: Ep; voice: string; quality: string; progress: number; status: 'queued' | 'active' | 'paused' | 'error' };
+export type Saved = { key: string; anime: Anime; ep: Ep; voice: string; quality: string; size: number };
 export type Hist = { key: string; anime: Anime; ep: number; time: number; at: number };
 export type DB = { fav: { anime: Anime; status: Status }[]; queue: QItem[]; saved: Saved[]; hist: Hist[] };
 
 const SH = 'https://shikimori.one';
 const JK = 'https://api.jikan.moe/v4';
 const AL = 'https://anilibria.top/api/v1';
+const AV = (import.meta.env.VITE_ANIMEVOST_API as string | undefined) || 'https://api.animevost.org/v1';
 const NF = 'NOT_FOUND';
 const MSG_NF = 'Такое аниме не найдено. Проверьте название или вставьте ссылку на Shikimori / MyAnimeList.';
 const MSG_NET = 'Каталоги не отвечают (сеть или блокировка браузера). Выберите тайтл кнопкой ниже или повторите позже.';
 
 /* ---------- сеть: любой запрос с жёстким таймаутом, включая чтение тела ---------- */
-async function tget<T>(url: string, read: (r: Response) => Promise<T>, ms = 7000, outer?: AbortSignal): Promise<T> {
+async function tget<T>(url: string, read: (r: Response) => Promise<T>, ms = 7000, outer?: AbortSignal, init?: RequestInit): Promise<T> {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), ms);
   const onAbort = () => ac.abort();
   outer?.addEventListener('abort', onAbort);
   try {
-    const r = await fetch(url, { signal: ac.signal });
+    const r = await fetch(url, { ...init, signal: ac.signal });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return await read(r);
   } finally { clearTimeout(t); outer?.removeEventListener('abort', onAbort); }
@@ -115,23 +117,48 @@ export async function findAnime(input: string): Promise<Anime> {
   try { return await firstOk(srcs.map((s) => s())); } catch (e) { throw fail(e as Error[]); }
 }
 
-/* ---------- авто-резолвер: AniLibria (строгое совпадение) → Kinobox ---------- */
+/* ---------- каскадный резолвер: AniLibria + AnimeVost (озвучки) → Kinobox только как крайний резерв ---------- */
+const https = (u: string) => u.replace(/^http:/, 'https:');
+type Ok = (s?: string) => boolean;
+
+async function aniLibria(a: Anime, ok: Ok): Promise<Voice | null> {
+  for (const q of new Set([a.titleEn, a.title].filter(Boolean))) {
+    const l = await jget(`${AL}/app/search/releases?query=${encodeURIComponent(q)}`);
+    const hit = (Array.isArray(l) ? l : l?.data || []).find((r: any) => ok(r.name?.main) || ok(r.name?.english));
+    if (!hit) continue;
+    let eps = hit.episodes;
+    if (!eps?.length) eps = (await jget(`${AL}/anime/releases/${hit.id}`)).episodes;
+    const out: Ep[] = (eps || []).filter((e: any) => e.hls_1080 || e.hls_720 || e.hls_480).map((e: any) => ({
+      n: e.ordinal, name: e.name || `Серия ${e.ordinal}`, q: { '1080': e.hls_1080, '720': e.hls_720, '480': e.hls_480 } }));
+    if (out.length) return { id: 'anilibria', name: 'AniLibria', eps: out };
+  }
+  return null;
+}
+
+// AnimeVost: POST /search (name) и POST /playlist (id) → прямые mp4: std = 480p, hd = 720p.
+async function aniVost(a: Anime, ok: Ok): Promise<Voice | null> {
+  const post = (path: string, body: Record<string, string>) =>
+    tget<any>(`${AV}${path}`, (r) => r.json(), 7000, undefined, { method: 'POST', body: new URLSearchParams(body) });
+  for (const q of new Set([a.title, a.titleEn].filter(Boolean))) {
+    const j = await post('/search', { name: q });
+    const hit = (j?.data || []).find((r: any) => String(r.title || '').replace(/\[.*?\]/g, '').split('/').some(ok));
+    if (!hit) continue;
+    const pl = await post('/playlist', { id: String(hit.id) });
+    const out: Ep[] = (Array.isArray(pl) ? pl : []).filter((e: any) => e.hd || e.std).map((e: any, i: number) => ({
+      n: +(String(e.name).match(/\d+/)?.[0] || i + 1), name: String(e.name),
+      q: { ...(e.hd && { '720': https(e.hd) }), ...(e.std && { '480': https(e.std) }) } }));
+    if (out.length) return { id: 'animevost', name: 'AnimeVost', eps: out };
+  }
+  return null;
+}
+
 export async function resolve(a: Anime): Promise<Resolved> {
   const names = new Set([a.title, a.titleEn, ...(localById(a.id)?.alt || [])].map(norm).filter(Boolean));
-  const ok = (s?: string) => { const n = norm(s); return !!n && names.has(n); };
-  for (const q of new Set([a.titleEn, a.title].filter(Boolean))) {
-    try {
-      const l = await jget(`${AL}/app/search/releases?query=${encodeURIComponent(q)}`);
-      const hit = (Array.isArray(l) ? l : l?.data || []).find((r: any) => ok(r.name?.main) || ok(r.name?.english));
-      if (!hit) continue;
-      let eps = hit.episodes;
-      if (!eps?.length) eps = (await jget(`${AL}/anime/releases/${hit.id}`)).episodes;
-      const out: Ep[] = (eps || []).filter((e: any) => e.hls_1080 || e.hls_720 || e.hls_480).map((e: any) => ({
-        n: e.ordinal, name: e.name || `Серия ${e.ordinal}`, q: { '1080': e.hls_1080, '720': e.hls_720, '480': e.hls_480 } }));
-      if (out.length) return { mode: 'hls', eps: out };
-    } catch { /* сеть/CORS/таймаут — пробуем дальше, затем Kinobox */ }
-  }
-  return { mode: 'kinobox' };
+  const ok: Ok = (s) => { const n = norm(s); return !!n && names.has(n); };
+  // источники опрашиваются параллельно и независимо: сбой одного (CORS/таймаут) не мешает другому
+  const r = await Promise.allSettled([aniLibria(a, ok), aniVost(a, ok)]);
+  const voices = r.flatMap((x) => (x.status === 'fulfilled' && x.value ? [x.value] : []));
+  return voices.length ? { mode: 'hls', voices } : { mode: 'kinobox' };
 }
 
 /* ---------- IndexedDB ---------- */
@@ -147,6 +174,15 @@ export const delBlob = async (k: string) => { const d = await idb(); return new 
 /* ---------- загрузка HLS (таймаут 30 с на плейлист и каждый сегмент) ---------- */
 export async function dl(url: string, onP: (p: number) => void, sig: AbortSignal): Promise<Blob> {
   const T = 30000;
+  if (!/\.m3u8/i.test(url)) { // прямой mp4 (AnimeVost): потоковое чтение с прогрессом
+    return tget(url, async (r) => {
+      const total = +(r.headers.get('content-length') || 0), rd = r.body?.getReader();
+      if (!rd) return new Blob([await r.blob()], { type: 'video/mp4' });
+      const parts: BlobPart[] = []; let got = 0;
+      for (;;) { const { done, value } = await rd.read(); if (done) break; parts.push(value); got += value.length; if (total) onP(got / total); }
+      return new Blob(parts, { type: 'video/mp4' });
+    }, 900000, sig);
+  }
   let base = url, txt = await tget(url, (r) => r.text(), T, sig);
   if (txt.includes('#EXT-X-STREAM-INF')) {
     const v = txt.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#'))!;
